@@ -1,9 +1,17 @@
 #include <algorithm>
-#include <bits/stdc++.h>
+#include <vector>
+#include <unordered_set>
+#include <random>
+#include <cstdio>
+#include <cmath>
+#include <cstdlib>
+#include <ctime>
 
-static constexpr int CONTEXT_RADIUS = 3;
-static constexpr int EMBEDDING_SIZE = 300;
-static constexpr double GRADIENT_FACTOR = 0.05;
+static constexpr int CONTEXT_RADIUS = 5;
+static constexpr int EMBEDDING_SIZE = 100;
+static constexpr double LEARNING_RATE = 0.025;
+static constexpr double NEG_FACTOR = 2;
+static constexpr int CONTEXT_SIZE = CONTEXT_RADIUS * 2 + 1;
 
 struct Embedding {
     double arr[EMBEDDING_SIZE];
@@ -12,102 +20,108 @@ struct Embedding {
 struct TokenCount {
     int index;
     int count;
-};
-
-double dot(const Embedding &a, const Embedding &b)
-{
-    double res = 0.0;
-    for (int i = 0; i < EMBEDDING_SIZE; i++) {
-        res += a.arr[i] * b.arr[i];
+    bool operator<(const TokenCount& other) const {
+        return count < other.count || (count == other.count && index < other.index);
     }
-
-    return res;
-}
-
-bool operator<(const TokenCount &a, const TokenCount &b)
-{
-    if (a.count != b.count) return a.count < b.count;
-    return a.index < b.index;
-}
+};
 
 int n_words;
 std::vector<int> unsorted_token_count;
 std::vector<TokenCount> token_count;
 std::vector<Embedding> embeddings;
 std::vector<int> text;
+std::mt19937 rng;
 
-double sigmoid(double x)
-{
-    return 1.0 / (1.0 + exp(-x));
-}
-
-bool is_in_positive_context(int mid, int word)
-{
-    for (int i = mid - CONTEXT_RADIUS; i <= mid + CONTEXT_RADIUS; i++) {
-        if (text[i] == word)
-            return false;
+double dot(const Embedding &a, const Embedding &b) {
+    double res = 0.0;
+    for (int i = 0; i < EMBEDDING_SIZE; ++i) {
+        res += a.arr[i] * b.arr[i];
     }
-    return true;
+    return res;
 }
 
-void find_negative_context(int word, std::vector<int> &res)
-{
+double sigmoid(double x) {
+    return 1.0 / (1.0 + std::exp(-x));
+}
+
+void find_negative_context(int mid_pos, std::vector<int>& res) {
     res.clear();
-    int word_count = unsorted_token_count[word];
-    int count_range = word_count / 10;
-
-    auto left = std::lower_bound(token_count.begin(), token_count.end(), TokenCount { 0, word_count - count_range });
-    auto right = std::upper_bound(token_count.begin(), token_count.end(), TokenCount { 0, word_count + count_range + 1 });
+    if (mid_pos < 0 || mid_pos >= text.size()) return;
     
-    for (int i = 0; i < CONTEXT_RADIUS * 8; i++) {
-        if (res.size() == CONTEXT_RADIUS * 4)
-            return;
+    int mid_word = text[mid_pos];
+    std::unordered_set<int> positive_words;
+    int start = std::max(0, mid_pos - CONTEXT_RADIUS);
+    int end = std::min((int)text.size(), mid_pos + CONTEXT_RADIUS + 1);
+    for (int i = start; i < end; ++i) {
+        positive_words.insert(text[i]);
+    }
 
-        auto it = left + (rand() % (right - left));
-        if (!is_in_positive_context(word, it->index) && std::find(res.begin(), res.end(), word) == res.end())
-            res.push_back(it->index);
+    int word_count = unsorted_token_count[mid_word];
+    int count_range = std::max(1, word_count / 10);
+    auto left = std::lower_bound(token_count.begin(), token_count.end(), TokenCount{0, word_count - count_range});
+    auto right = std::upper_bound(token_count.begin(), token_count.end(), TokenCount{0, word_count + count_range});
+
+    std::vector<int> candidates;
+    while (candidates.size() < CONTEXT_RADIUS * NEG_FACTOR * 2 && left != right) {
+        int idx = left->index;
+        if (!positive_words.count(idx) && idx != mid_word) {
+            candidates.push_back(idx);
+        }
+        ++left;
+    }
+
+    std::shuffle(candidates.begin(), candidates.end(), rng);
+    for (int i = 0; i < candidates.size() && res.size() < CONTEXT_RADIUS * NEG_FACTOR; ++i) {
+        res.push_back(candidates[i]);
+    }
+
+    // not enough words
+    std::uniform_int_distribution<int> dist(0, n_words - 1);
+    while (res.size() < CONTEXT_RADIUS * NEG_FACTOR) {
+        int word = dist(rng);
+        if (!positive_words.count(word) && word != mid_word) {
+            res.push_back(word);
+        }
     }
 }
 
-void run_sliding_context()
-{
-    int context_size = CONTEXT_RADIUS * 2 + 1;
-    int half = context_size / 2;
-    int left = 0;
-    
+void run_sliding_context() {
     std::vector<int> negative_context;
+    
+    for (int left = 0; left <= text.size() - CONTEXT_SIZE; ++left) {
+        int mid_pos = left + CONTEXT_RADIUS;
+        int mid_word = text[mid_pos];
+        Embedding& center_emb = embeddings[mid_word];
 
-    while (left + context_size != text.size()) {
-        int progress = (left + context_size) * 100 / text.size();
-        int prev_progress = (left + context_size - 1) * 100 / text.size();
-        if (progress / 5 != prev_progress / 5)
-            wprintf(L"%d%%\n", progress);
+        for (int i = left; i < left + CONTEXT_SIZE; ++i) {
+            if (i == mid_pos) continue;
+            int context_word = text[i];
+            Embedding& context_emb = embeddings[context_word];
+            double score = dot(center_emb, context_emb);
+            double gradient = (sigmoid(score) - 1.0) * LEARNING_RATE;
 
-        int mid_word = text[left + half];
-        Embedding new_embedding = embeddings[mid_word];
-
-        for (int i = 0; i < context_size; i++) {
-            if (i == half) continue;
-            
-            double coeff = (sigmoid(dot(embeddings[text[left + i]], embeddings[mid_word])) - 1) * GRADIENT_FACTOR;
-            for (int j = 0; j < EMBEDDING_SIZE; j++) {
-                new_embedding.arr[j] -= embeddings[text[left + i]].arr[j] * coeff;
+            for (int j = 0; j < EMBEDDING_SIZE; ++j) {
+                double update = gradient * context_emb.arr[j];
+                center_emb.arr[j] -= update;
+                context_emb.arr[j] -= gradient * center_emb.arr[j];
             }
         }
 
-        find_negative_context(mid_word, negative_context);
+        find_negative_context(mid_pos, negative_context);
+        for (int neg_word : negative_context) {
+            Embedding& neg_emb = embeddings[neg_word];
+            double score = dot(center_emb, neg_emb);
+            double gradient = sigmoid(score) * LEARNING_RATE;
 
-        for (int i = 0; i < negative_context.size(); i++){
-            double coeff = sigmoid(dot(embeddings[negative_context[i]], embeddings[mid_word])) * GRADIENT_FACTOR;
-            for (int j = 0; j < EMBEDDING_SIZE; j++) {
-                new_embedding.arr[j] -= embeddings[negative_context[i]].arr[j] * coeff;
+            for (int j = 0; j < EMBEDDING_SIZE; ++j) {
+                double update = gradient * neg_emb.arr[j];
+                center_emb.arr[j] -= update;
+                neg_emb.arr[j] -= gradient * center_emb.arr[j];
             }
         }
-
-        embeddings[mid_word] = new_embedding;
-        left++;
     }
 }
+
 
 double randrange(double min, double max) 
 {
@@ -168,6 +182,7 @@ int main(int argc, char ** argv)
     
     for (auto &x : embeddings) {
         for (int i = 0; i < EMBEDDING_SIZE; i++) {
+            double r = 0.5 / (double)n_words;
             x.arr[i] = randrange(-1, 1);
         }
     }

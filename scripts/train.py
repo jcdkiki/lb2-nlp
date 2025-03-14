@@ -3,13 +3,15 @@ import numpy as np
 from tensorflow.keras.layers import Dense, Input, Embedding, Flatten
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping
 from dataclasses import dataclass
 from tensorflow import keras
 import sys
+import time
 
 CONTEXT_SIZE = 10
 BATCH_SIZE = 128
-N_EPOCHS = 1
+N_EPOCHS = 10
 
 @dataclass
 class Embeddings:
@@ -48,6 +50,7 @@ def data_generator(text, embeddings):
         yield X, y
 
 def main() -> int:    
+    np.random.seed(int(time.time()))
     embeddings = read_embeddings()
 
     if sys.argv[1] == "train":
@@ -57,7 +60,7 @@ def main() -> int:
             
             model = Sequential([
                 Input(shape=(embeddings.size*CONTEXT_SIZE,)),
-                Dense(256, activation='relu'),
+                Dense(500, activation='relu'),
                 Dense(embeddings.n_words, activation='softmax')
             ])
             
@@ -79,7 +82,8 @@ def main() -> int:
         model.fit(
             data_generator(text, embeddings),
             steps_per_epoch=steps_per_epoch,
-            epochs=N_EPOCHS
+            epochs=N_EPOCHS,
+            callbacks=[EarlyStopping(monitor='val_loss', patience=3)]
         )
 
         model.save("model.keras")
@@ -87,7 +91,7 @@ def main() -> int:
     elif sys.argv[1] == "test":
         model = keras.models.load_model(sys.argv[2])
 
-        test_sentence = sys.argv[3:]
+        test_sentence = [ x.lower() for x in sys.argv[3:]]
         words = [ s[:-1] for s in open("words.txt").readlines() if len(s) != 0 ]
 
         test_sequence = []
@@ -98,15 +102,22 @@ def main() -> int:
             test_sequence = [0]*((CONTEXT_SIZE - len(test_sentence)) * embeddings.size) + test_sequence
 
         result = []
+        log_probs = []
 
-        for i in range(20):
+        for i in range(100):
             probs = model.predict(np.array(test_sequence).reshape(1, -1))[0]
             next_word = np.argmax(probs, axis=None, out=None)
+            
+            log_probs.append(np.log(probs[next_word]))
+
             result.append(next_word)
             test_sequence = test_sequence[embeddings.size:] + embeddings.arr[next_word]
 
+        perplexity = np.exp(-np.mean(log_probs))
+
         print(' '.join(test_sentence))
         print(' '.join([words[i] for i in result]))
+        print(f"perplexity: {perplexity}")
 
     else:
         print("specify train/test")
